@@ -1,0 +1,27 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <value>
+          <list size="1">
+            <item index="0" class="java.lang.String" itemvalue="scikit-image" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="main.Fresnel" />
+          <option value="main.uin" />
+          <option value="main.wvl" />
+          <option value="main.d1" />
+          <option value="main.d2" />
+          <option value="main.dz" />
+          <option value="main.pred_y" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
