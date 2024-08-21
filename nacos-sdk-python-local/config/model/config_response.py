@@ -1,7 +1,6 @@
 from datetime import datetime
 from typing import List
 from ...common.model.response import Response
-from .config import ConfigContext
 
 
 class ConfigChangeBatchListenResponse(Response):
