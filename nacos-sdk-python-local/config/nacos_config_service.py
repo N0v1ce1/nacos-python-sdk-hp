@@ -1,12 +1,12 @@
+import copy
 import threading
 import time
 import uuid
-from idlelib.rpc import RPCClient
-from typing import Optional
 from ..common.constants import Constants
 from ..common.client_config import ClientConfig
 from ..nacos_client import NacosClient
 from model.config_proxy import ConfigProxy
+from model.config_param import UsageType
 from model.config_filter import *
 from model.config_param import *
 from model.config import *
@@ -39,19 +39,87 @@ class CacheData:
         self.config_client = config_client
 
 
-class ConfigClient:
-    def __init__(self, logger):
+class ConfigClient(NacosClient):
+    def __init__(self, logger,
+                 log_file: str,
+                 client_config: ClientConfig,
+                 config_filter_chain_manager: ConfigFilterChain,
+                 config_proxy: ConfigProxy,
+                 config_cache_dir: str,
+                 uid: str,
+                 listen_execute):
+        super().__init__(client_config, log_file)
         self.logger = logger
-        # self.cancel = lambda : None
-        self.nacos_client = None
-        self.config_filter_chain_manager = None
-        self.local_configs = None
-        self.config_proxy = None
-        self.config_cache_dir = None
+        self.config_filter_chain_manager = config_filter_chain_manager
+        self.config_proxy = config_proxy
+        self.config_cache_dir = config_cache_dir
         self.last_all_sync_time = time.time()
         self.cache_map = []
-        self.uid = None
-        self.listen_execute = None
+        self.uid = uid
+        self.listen_execute = listen_execute
+
+    @staticmethod
+    def new_config_client(logger,
+                          log_file: str,
+                          client_config: ClientConfig,
+                          config_filter_chain_manager: ConfigFilterChain,
+                          config_proxy: ConfigProxy,
+                          config_cache_dir: str,
+                          uid: str,
+                          listen_execute):
+        return ConfigClient(logger,
+                            log_file,
+                            client_config,
+                            config_filter_chain_manager,
+                            config_proxy,
+                            config_cache_dir,
+                            uid,
+                            listen_execute)
+
+    def get_config_filter_chain_manager(self):
+        return self.config_filter_chain_manager
+
+    def set_config_filter_chain_manager(self, manager):
+        self.config_filter_chain_manager = manager
+
+    def get_local_configs(self):
+        return self.local_configs
+
+    def set_local_configs(self, configs):
+        self.local_configs = configs
+
+    def get_config_proxy(self):
+        return self.config_proxy
+
+    def set_config_proxy(self, proxy):
+        self.config_proxy = proxy
+
+    def get_config_cache_dir(self):
+        return self.config_cache_dir
+
+    def set_config_cache_dir(self, dir_path):
+        self.config_cache_dir = dir_path
+
+    def get_last_all_sync_time(self):
+        return self.last_all_sync_time
+
+    def get_cache_map(self):
+        return self.cache_map
+
+    def set_cache_map(self, cache_map):
+        self.cache_map = cache_map
+
+    def get_uid(self):
+        return self.uid
+
+    def set_uid(self, uid):
+        self.uid = uid
+
+    def get_listen_execute(self):
+        return self.listen_execute
+
+    def set_listen_execute(self, execute):
+        self.listen_execute = execute
 
 
 class ConfigService:
@@ -67,45 +135,47 @@ class ConfigService:
         self.client_config = client_config
         self.config_proxy = config_proxy
         self.rpc_client = rpc_client
-        self.cache_map = []
         self.config_cache_dir = os.path.join(self.nacos_client.client_config.cache_dir, "config")
         self.listen_execute = threading.Event()  # 改
         self.namespace_id = client_config.namespace_id
         self.config_client = self.get_config_client()
+        self.cache_map = self.config_client.cache_map
 
     def get_config_client(self):
-        config_client = ConfigClient(self.logger)
-        config_client.nacos_client = self.nacos_client
-        config_client.config_proxy = self.config_proxy
-        config_client.config_filter_chain_manager = self.config_filter_chain_manager
-        config_client.config_cache_dir = self.config_cache_dir
-        config_client.uid = uuid.uuid4()
-        config_client.listen_execute = self.listen_execute
         self.start_internal()
-        return config_client
+        return ConfigClient.new_config_client(self.logger,
+                                              None,
+                                              self.client_config,
+                                              self.config_filter_chain_manager,
+                                              self.config_proxy,
+                                              self.config_cache_dir,
+                                              str(uuid.uuid4()),
+                                              self.listen_execute)
 
     def get_config(self, param: ConfigParam):
         """获取配置信息, 过滤response"""
         content, encrypted_data_key, err_msg = self._get_config_inner(param)
         if err_msg is not None:
             return "", err_msg
-        config_response = ConfigResponse()
-        config_response.set_data_id(param.data_id)
-        config_response.set_tenant(self.namespace_id)
-        config_response.set_group(param.group)
-        config_response.set_content(content)
-        config_response.set_encrypted_data_key(encrypted_data_key)
-        self.config_filter_chain_manager.do_filters(config_response)
+        deep_copy = copy.deepcopy(param)
+        deep_copy.encrypted_data_key = encrypted_data_key
+        deep_copy.content = content
+        deep_copy.type = UsageType.response_type
+        try:
+            self.config_filter_chain_manager.do_filters(deep_copy)
+        except Exception as e:
+            return "", str(e)
         return content, None
 
     def _get_config_inner(self, param: ConfigParam):
-        param.group = self._blank_to_default_group(param)
+        if not param.group:
+            param.group = Constants.DEFAULT_GROUP
         check_key_param(param.data_id, param.group)
 
         cache_key = get_config_cache_key(param.data_id, param.group, self.namespace_id)
         content = get_failover(cache_key, self.config_client.config_cache_dir, self.logger)
 
-        if len(content) > 0:
+        if content:
             self.logger.warning(f"{self.namespace_id} {param.group} {param.data_id} is using failover content!")
             encrypted_data_key = get_failover_encrypted_data_key(cache_key, self.config_client.config_cache_dir,
                                                                  self.logger)
@@ -216,10 +286,10 @@ class ConfigService:
 
     def remove_config(self, param: ConfigParam):
         """移除配置信息"""
-        if len(param.data_id) <= 0:
+        if not param.data_id:
             self.logger.error("[client.DeleteConfig] param.dataId can not be empty")
 
-        if len(param.group) <= 0:
+        if not param.group:
             param.group = Constants.DEFAULT_GROUP
 
         request = RpcRequest.remove_request(param.group, param.data_id, self.namespace_id)
@@ -280,9 +350,6 @@ class ConfigService:
         """关闭资源服务"""
         self.config_proxy.get_rpc_client.shutdown()
         self.config_proxy.shut_down()
-
-    def _blank_to_default_group(self, param: ConfigParam):
-        return param.group.strip() if param.group else Constants.DEFAULT_GROUP
 
     def _build_response(self, response):
         if response.is_success():
