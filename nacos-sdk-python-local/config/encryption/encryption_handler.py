@@ -1,10 +1,32 @@
+import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
-from .encryption_plugin_manager import EncryptionPluginManager
+from typing import Optional, Tuple, Dict
+from encryption_plugin_manager import EncryptionPluginManager
+from ...common.constants import Constants
+from ...common.client_config import ClientConfig
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
+
+
+class HandlerParam:
+    def __init__(self, data_id, content, encrypted_data_key='', plain_data_key='', key_id=''):
+        self.data_id = data_id
+        self.content = content
+        self.encrypted_data_key = encrypted_data_key
+        self.plain_data_key = plain_data_key
+        self.key_id = key_id
+
+    # 序列化
+    def to_json(self):
+        return json.dumps(self, default=lambda o: o.__dict__, indent=4)
+
+    # 反序列化
+    @staticmethod
+    def from_json(json_str):
+        data = json.loads(json_str)
+        return HandlerParam(**data)
 
 
 class EncryptionHandler:

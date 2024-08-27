@@ -1,4 +1,5 @@
 import copy
+import os
 import threading
 import time
 import uuid
@@ -6,22 +7,20 @@ from ..common.constants import Constants
 from ..common.client_config import ClientConfig
 from ..nacos_client import NacosClient
 from model.config_proxy import ConfigProxy
-from model.config_param import UsageType
-from model.config_filter import *
-from model.config_param import *
-from model.config import *
+from model.config_param import UsageType, ConfigParam
+from model.config_filter import ConfigFilterChain, new_config_filter_chain_manager
+from model.config_param import Listener, SearchConfigParam
+from model.config import ConfigPage
 from ..util.common_util import check_key_param, get_config_cache_key
 from ..util.md5_util import md5
 from model.config_response import ConfigResponse
 from model.config_request import ConfigRequest
-from cache.disk_cache import *
+from cache.disk_cache import get_failover_encrypted_data_key, read_config_from_file, read_encrypted_data_key_from_file, \
+    get_failover
 from ..transport.model import RpcRequest
 from ... import NacosError
 
 perTaskConfigSize = 3000
-
-
-# 以下为 IConfigFilter 接口的 Python 版本示例，具体实现根据实际需要进行
 
 
 class CacheData:
@@ -358,18 +357,121 @@ class ConfigService:
         self.logger.error(err_msg)
         return False
 
+    # 下面是execute_listener的逻辑，待确认
+    PER_TASK_CONFIG_SIZE = 3000
+    EXECUTOR_ERR_DELAY = 5
+
     # 下面是listener的逻辑，待确认
-    def start_internal(self):
-        pass
+    async def start_internal(self):
+        while True:
+            try:
+                if self.is_shutdown():
+                    return
+                done, pending = await asyncio.wait([self.listen_execute.get(), asyncio.sleep(EXECUTOR_ERR_DELAY)],
+                                                   return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                self.execute_config_listen()
+            except Exception as e:
+                pass
 
     def execute_config_listen(self):
-        pass
 
-    def build_config_batch_listen_request(self):
-        pass
+        need_all_sync = (time.time() - self.last_all_sync_time) >= Constant.ALL_SYNC_INTERNAL
+        has_changed_keys = False
 
-    def refresh_content_and_check(self):
-        pass
+        listen_task_map = self.build_listen_task(need_all_sync)
+        if not listen_task_map:
+            return
+
+        for task_id, caches in listen_task_map.items():
+            request = self.build_config_batch_listen_request(caches)
+            rpc_client = self.config_proxy.create_rpc_client(str(task_id))
+            try:
+                i_response = self.request_proxy(rpc_client, request, 3)
+                if i_response is None:
+                    self.logger.warn("ConfigBatchListenRequest failure, response is nil")
+                    continue
+                if not i_response.is_success():
+                    self.logger.warn(f"ConfigBatchListenRequest failure, error code:{i_response.get_error_code()}")
+                    continue
+                response = i_response  # 断言？
+                if not response:
+                    continue
+
+                if len(response.changed_configs) > 0:
+                    has_changed_keys = True
+
+                change_keys = {}
+                for v in response.changed_configs:
+                    change_key = common_util.get_config_cache_key(v.data_id, v.group, v.tenant)
+                    if self.cache_map.get(change_key):
+                        c_data = self.cache_map[change_key]
+                        self.refresh_content_and_check(c_data, not c_data.is_initializing)
+
+                for k, v in self.cache_map.items():
+                    data = v
+                    change_key = self.get_config_cache_key(data.data_id, data.group, data.tenant)
+                    if change_key not in change_keys:
+                        data.is_sync_with_server = True
+                        continue
+
+                    data.is_initializing = True
+                    self.cache_map[change_key] = data
+
+            except Exception as e:
+                self.logger.warn(f"ConfigBatchListenRequest failure, err:{str(e)}")
+                continue
+            finally:
+                if need_all_sync:
+                    self.last_all_sync_time = time.time()
+
+                if has_changed_keys:
+                    self.async_notify_listen_config()
+
+    def build_config_batch_listen_request(self, caches):
+        request = config_request.ConfigBatchListenRequest.new_config_batch_listen_request(len(caches))
+        for cache in caches:
+            config_listen_context = ConfigListenContext(Group=cache.group, Md5=cache.md5, data_id=cache.data_id,
+                                                        tenant=cache.tenant)
+            request.config_listen_contexts.append(config_listen_context)
+        return request
+
+    def refresh_content_and_check(self, cache_data, notify):
+        try:
+            config_query_response = self.config_proxy.query_config(
+                cache_data.data_id, cache_data.group, cache_data.tenant,
+                Constants.DEFAULT_TIMEOUT_MILLS, notify)
+
+            if config_query_response and config_query_response.response and not config_query_response.is_success():
+                self.logger.error(
+                    f"refresh cached config from server error:{config_query_response.get_message()}, dataId={cache_data.data_id}, group={cache_data.group}")
+                return
+
+            cache_data.content = config_query_response.content
+            cache_data.content_type = config_query_response.content_type
+            cache_data.encrypted_data_key = config_query_response.encrypted_data_key
+            if notify:
+                self.logger.info(
+                    f"[config_rpc_client] [data-received] dataId={cache_data.data_id}, group={cache_data.group}, tenant={cache_data.tenant}, md5={cache_data.md5}, content={util.truncate_content(cache_data.content)}, type={cache_data.content_type}")
+
+            cache_data.md5 = md5_util.md5_digest(cache_data.content)
+            if cache_data.md5 != cache_data.cache_data_listener.last_md5:
+                cache_data.execute_listener()
+        except Exception as e:
+            self.logger.error("refresh content and check md5 fail, dataId=%s, group=%s, tenant=%s",
+                          cache_data.data_id, cache_data.group, cache_data.tenant)
 
     def build_listen_task(self):
-        pass
+        listen_task_map = {}
+
+        for data in self.cache_map.values():
+            if data.is_sync_with_server:
+                if data.md5 != data.cache_data_listener.last_md5:
+                    data.execute_listener()
+                if not need_all_sync:
+                    continue
+            listen_task_map[data.taskId].append(data)
+
+        return listen_task_map
+

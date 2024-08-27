@@ -1,4 +1,5 @@
 class Constants:
+
   DEFAULT_TIMEOUT_MILLS = 3000
 
   CONFIG_INFO_SPLITER = "@@"

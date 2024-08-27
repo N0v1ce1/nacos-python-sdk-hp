@@ -1,11 +1,12 @@
 import base64
+from abc import abstractmethod, ABC
+
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 from Crypto.Protocol.KDF import PBKDF2
 from .abstract_encryption_plugin_service import AbstractEncryptionPluginService
 import logging
-#pip install pycryptodome
 
 # 设置日志配置
 logging.basicConfig(level=logging.INFO)

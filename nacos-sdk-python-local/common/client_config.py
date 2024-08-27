@@ -88,6 +88,10 @@ class ClientConfig:
         self.kms_config = kms_config
         return self
 
+    def set_kms_version(self, kms_version):
+        self.kms_version = kms_version
+        return self
+
     def set_not_load_cache_at_start(self, not_load_cache_at_start):
         self.not_load_cache_at_start = not_load_cache_at_start
         return self
